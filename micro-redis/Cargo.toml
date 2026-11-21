@@ -1,0 +1,14 @@
+[package]
+name = "micro-redis"
+version = "0.1.0"
+edition = "2021"
+description = "A small Redis-compatible server: the starting point for Mini 3 (Micro-Redis Cluster)."
+publish = false
+
+[dependencies]
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+redis = { version = "0.27", features = ["tokio-comp"] }
