@@ -3,6 +3,7 @@
 pub mod check;
 pub mod history;
 pub mod resp;
+pub mod schedule;
 
 #[cfg(test)]
 mod check_tests;
