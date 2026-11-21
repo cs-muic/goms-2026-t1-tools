@@ -4,11 +4,13 @@
 //! - [`connection`]: reading and writing frames on a socket.
 //! - [`db`]: the key space.
 //! - [`cmd`]: parsing and running commands.
+//! - [`server`]: the accept loop.
 
 pub mod cmd;
 pub mod connection;
 pub mod db;
 pub mod resp;
+pub mod server;
 
 pub use db::Db;
 pub use resp::Frame;
