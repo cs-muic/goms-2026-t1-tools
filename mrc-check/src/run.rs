@@ -111,6 +111,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 5)]
     pub max_examples: usize,
 
+    /// Also fail on violations that only a linearizable cluster must avoid
+    /// (stale reads, list order and lengths seen during the run). Without
+    /// it, these are reported as notes.
+    #[arg(long)]
+    pub strict: bool,
+
     /// Random seed for the workload (default: random).
     #[arg(long)]
     pub seed: Option<u64>,
@@ -128,7 +134,10 @@ pub struct RunArgs {
 pub struct RunResult {
     pub run_id: String,
     pub history: History,
+    /// Violations that fail the run.
     pub violations: Vec<Violation>,
+    /// Linearizability violations that don't fail the run (without --strict).
+    pub notes: Vec<Violation>,
     pub schedule_ok: bool,
     pub failed_ops: u64,
     pub history_path: Option<PathBuf>,
@@ -516,6 +525,6 @@ pub async fn run(a: RunArgs, stopped: Arc<Mutex<Vec<i32>>>) -> Result<RunResult>
     };
 
     say("checking".into());
-    let violations = check::check(&history);
-    Ok(RunResult { run_id, history, violations, schedule_ok, failed_ops, history_path })
+    let (violations, notes) = check::partition(check::check(&history), a.strict);
+    Ok(RunResult { run_id, history, violations, notes, schedule_ok, failed_ops, history_path })
 }

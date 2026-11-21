@@ -28,10 +28,13 @@ enum Command {
         /// Show at most this many examples of each kind of violation.
         #[arg(long, default_value_t = 5)]
         max_examples: usize,
+        /// Also fail on linearizability-only violations.
+        #[arg(long)]
+        strict: bool,
     },
 }
 
-fn report(h: &History, violations: &[check::Violation], max_examples: usize) {
+fn report(h: &History, violations: &[check::Violation], notes: &[check::Violation], max_examples: usize) {
     print!("{}", summarize(h));
     if violations.is_empty() {
         println!("safety checks: no violations found");
@@ -39,13 +42,23 @@ fn report(h: &History, violations: &[check::Violation], max_examples: usize) {
         println!("safety checks: {} violation(s)", violations.len());
         print!("{}", check::render(violations, h, max_examples));
     }
+    if !notes.is_empty() {
+        let mut kinds: Vec<&str> = notes.iter().map(|n| n.kind.title()).collect();
+        kinds.sort();
+        kinds.dedup();
+        println!(
+            "note: {} linearizability violation(s) ({}). Not required for this mini; rerun with --strict to see and fail on them.",
+            notes.len(),
+            kinds.join(", ")
+        );
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
-        Command::Check { file, max_examples } => {
+        Command::Check { file, max_examples, strict } => {
             let h = match std::fs::File::open(&file)
                 .map_err(anyhow::Error::from)
                 .and_then(|f| History::read_jsonl(BufReader::new(f)))
@@ -56,8 +69,8 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let v = check::check(&h);
-            report(&h, &v, max_examples);
+            let (v, notes) = check::partition(check::check(&h), strict);
+            report(&h, &v, &notes, max_examples);
             let failed_steps = h.events.iter().any(|e| !e.ok);
             if v.is_empty() && !failed_steps {
                 println!("PASS");
@@ -90,7 +103,7 @@ async fn main() -> ExitCode {
                 }
             };
             println!("run {}", res.run_id);
-            report(&res.history, &res.violations, max_examples);
+            report(&res.history, &res.violations, &res.notes, max_examples);
             if let Some(p) = &res.history_path {
                 println!("history: {}", p.display());
             }

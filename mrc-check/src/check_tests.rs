@@ -343,3 +343,64 @@ fn render_mentions_ops() {
     assert!(s.contains("#3"), "{s}");
 }
 
+// ---------- required (non-strict) checks ----------
+
+fn required(h: &H) -> Vec<Kind> {
+    let (fail, _) = crate::check::partition(check(&h.h), false);
+    let mut k: Vec<Kind> = fail.into_iter().map(|v| v.kind).collect();
+    k.sort();
+    k.dedup();
+    k
+}
+
+#[test]
+fn stale_reads_during_the_run_are_not_required() {
+    let h = H::default()
+        .set("k", "a", 0, 10)
+        .set("k", "b", 20, 30)
+        .get("k", Some("a"), 40, 50)
+        .get("k", Some("b"), 100, 110)
+        .fin();
+    assert_eq!(required(&h), vec![]);
+    assert_eq!(h.kinds(), vec![Kind::StaleRead]);
+}
+
+#[test]
+fn list_order_during_the_run_is_not_required() {
+    // Mid-run reads disagree on order with the final list; nothing was lost.
+    let h = H::default()
+        .rpush("l", "a", 1, 0, 10)
+        .rpush("l", "b", 1, 20, 30)
+        .lrange("l", &["b"], 35, 40)
+        .lrange("l", &["a", "b"], 100, 110)
+        .fin();
+    assert_eq!(required(&h), vec![]);
+    assert!(!h.kinds().is_empty());
+}
+
+#[test]
+fn push_seen_mid_run_but_missing_at_the_end_is_lost() {
+    let h = H::default()
+        .rpush_unknown("l", "a", 0, 10)
+        .lrange("l", &["a"], 20, 30)
+        .lrange("l", &[], 100, 110)
+        .fin();
+    assert_eq!(required(&h), vec![Kind::LostWrite]);
+}
+
+#[test]
+fn final_list_shorter_than_observed_length_is_lost() {
+    let h = H::default()
+        .rpush_unknown("l", "a", 0, 10)
+        .rpush_unknown("l", "b", 0, 10)
+        .llen("l", 2, 20, 30)
+        .lrange("l", &["a"], 100, 110)
+        .fin();
+    assert_eq!(required(&h), vec![Kind::LostWrite]);
+}
+
+#[test]
+fn final_value_overwritten_by_later_write_is_lost_even_without_strict() {
+    let h = H::default().set("k", "a", 0, 10).set("k", "b", 20, 30).get("k", Some("a"), 100, 110).fin();
+    assert_eq!(required(&h), vec![Kind::LostWrite]);
+}

@@ -210,9 +210,13 @@ async fn two_routers_on_one_store_pass() {
     assert!(res.violations.is_empty());
 }
 
-async fn kinds_for(bug: Bug) -> Vec<Kind> {
+async fn kinds_for(bug: Bug, strict: bool) -> Vec<Kind> {
     let r = fake_router(bug).await;
-    let res = run(args(&["--router", &r], &tmpdir()), Arc::default()).await.unwrap();
+    let mut a = vec!["--router", r.as_str()];
+    if strict {
+        a.push("--strict");
+    }
+    let res = run(args(&a, &tmpdir()), Arc::default()).await.unwrap();
     let mut k: Vec<Kind> = res.violations.iter().map(|v| v.kind).collect();
     k.sort();
     k.dedup();
@@ -221,19 +225,23 @@ async fn kinds_for(bug: Bug) -> Vec<Kind> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lost_writes_are_caught() {
-    let k = kinds_for(Bug::LoseWrites).await;
-    assert!(k.contains(&Kind::StaleRead) || k.contains(&Kind::LostWrite), "{k:?}");
+    // Caught by the required (non-strict) checks alone.
+    let k = kinds_for(Bug::LoseWrites, false).await;
+    assert!(k.contains(&Kind::LostWrite), "{k:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_reads_are_caught() {
-    let k = kinds_for(Bug::StaleReads).await;
+    let k = kinds_for(Bug::StaleReads, true).await;
     assert!(k.contains(&Kind::StaleRead), "{k:?}");
+    // Without --strict, mid-run stale reads are only notes.
+    let k = kinds_for(Bug::StaleReads, false).await;
+    assert!(!k.contains(&Kind::StaleRead), "{k:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reordered_pushes_are_caught() {
-    let k = kinds_for(Bug::ReorderPushes).await;
+    let k = kinds_for(Bug::ReorderPushes, true).await;
     assert!(!k.is_empty(), "{k:?}");
 }
 

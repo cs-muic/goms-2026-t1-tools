@@ -63,7 +63,7 @@ impl Kind {
 
     pub fn explain(self) -> &'static str {
         match self {
-            Kind::LostWrite => "After the workload stopped, a final read did not see a write that had definitely taken effect.",
+            Kind::LostWrite => "After the workload stopped, a final read did not see a write that had definitely taken effect (or a later write that replaced it).",
             Kind::StaleRead => "A read returned a value that had definitely been overwritten (or missed a push that had definitely happened) before the read began.",
             Kind::UnknownValue => "A read returned a value that no client ever wrote to that key.",
             Kind::FutureRead => "A read returned a value whose write had not even been sent when the read completed.",
@@ -87,6 +87,29 @@ pub struct Violation {
     pub key: String,
     pub msg: String,
     pub ops: Vec<u64>,
+}
+
+impl Kind {
+    /// Required checks hold for any cluster that never loses an acknowledged
+    /// write and never invents data, whatever its consistency model. The rest
+    /// (stale reads, list order and lengths seen during the run) only hold for
+    /// a linearizable cluster, and fail the run only with `--strict`.
+    pub fn required(self) -> bool {
+        !matches!(
+            self,
+            Kind::StaleRead
+                | Kind::ListDivergence
+                | Kind::MisplacedPush
+                | Kind::DuplicatePushLength
+                | Kind::PushOrder
+                | Kind::LengthRegression
+        )
+    }
+}
+
+/// Splits violations into (failures, strict-only notes) for the chosen mode.
+pub fn partition(vs: Vec<Violation>, strict: bool) -> (Vec<Violation>, Vec<Violation>) {
+    vs.into_iter().partition(|x| strict || x.kind.required())
 }
 
 /// Runs every check over the history.
@@ -309,6 +332,8 @@ fn check_list(key: &str, ops: &[&Op], out: &mut Vec<Violation>) {
         }
     }
 
+    let sane: Vec<(&Op, &[String])> = lranges.clone();
+
     // 2. All LRANGE results must be prefixes of the longest one, M.
     let (m_op, m): (Option<&Op>, &[String]) = lranges
         .iter()
@@ -405,17 +430,16 @@ fn check_list(key: &str, ops: &[&Op], out: &mut Vec<Violation>) {
             ptr += 1;
         }
         let Some((wp, i)) = worst else { continue };
-        if wp < items.len() {
+        if wp < items.len() || r.final_read {
             continue;
         }
         let p = pushes[i];
         flagged.insert(r.id);
         out.push(v(
-            if r.final_read { Kind::LostWrite } else { Kind::StaleRead },
+            Kind::StaleRead,
             key,
             format!(
-                "{}LRANGE starting at {} returned {} items, but RPUSH #{} of {:?} {} by {} and is {}{}",
-                if r.final_read { "final " } else { "" },
+                "LRANGE starting at {} returned {} items, but RPUSH #{} of {:?} {} by {} and is {}",
                 secs(r.inv),
                 items.len(),
                 p.id,
@@ -423,7 +447,6 @@ fn check_list(key: &str, ops: &[&Op], out: &mut Vec<Violation>) {
                 how(p, eff[i]),
                 secs(eff[i]),
                 where_is(p),
-                if r.final_read && pos_of(p).is_none() { ": that push was lost" } else { "" }
             ),
             vec![r.id, p.id],
         ));
@@ -507,7 +530,7 @@ fn check_list(key: &str, ops: &[&Op], out: &mut Vec<Violation>) {
             let shrank = a.len > b.len || (b.push && a.len >= b.len);
             if shrank && !flagged.contains(&b.op.id) {
                 out.push(v(
-                    if b.op.final_read { Kind::LostWrite } else { Kind::LengthRegression },
+                    Kind::LengthRegression,
                     key,
                     format!(
                         "{} #{} saw length {} at {}, but {} #{} had already seen length {} by {}",
@@ -541,6 +564,56 @@ fn check_list(key: &str, ops: &[&Op], out: &mut Vec<Violation>) {
         }
     }
 
+    // 7. Final state, independent of order: once the cluster is quiet, every
+    //    push that definitely took effect (acknowledged, or seen by any read)
+    //    must be in the list, and the list can't be shorter than any length
+    //    observed during the run.
+    let mut took_effect: Vec<bool> = pushes.iter().map(|p| p.acked()).collect();
+    for &(r, items) in &sane {
+        if !r.final_read {
+            for x in items {
+                took_effect[by_val[x.as_str()]] = true;
+            }
+        }
+    }
+    let longest = obs.iter().filter(|o| !o.op.final_read).max_by_key(|o| o.len);
+    for &(r, items) in sane.iter().filter(|(r, _)| r.final_read) {
+        let have: HashSet<&str> = items.iter().map(String::as_str).collect();
+        let missing: Vec<&Op> = pushes
+            .iter()
+            .zip(&took_effect)
+            .filter(|(p, &t)| t && !have.contains(p.value.as_deref().unwrap_or("")))
+            .map(|(p, _)| *p)
+            .collect();
+        if let Some(p) = missing.first() {
+            out.push(v(
+                Kind::LostWrite,
+                key,
+                format!(
+                    "final LRANGE has {} items but is missing {} push(es) that took effect, e.g. RPUSH #{} of {:?} ({})",
+                    items.len(),
+                    missing.len(),
+                    p.id,
+                    p.value.as_deref().unwrap_or(""),
+                    if p.acked() { "acknowledged" } else { "seen by an earlier read" }
+                ),
+                vec![r.id, p.id],
+            ));
+        } else if let Some(o) = longest.filter(|o| o.len > items.len() as i64) {
+            out.push(v(
+                Kind::LostWrite,
+                key,
+                format!(
+                    "final LRANGE has {} items, but {} #{} saw length {} during the run",
+                    items.len(),
+                    o.op.cmd.name(),
+                    o.op.id,
+                    o.len
+                ),
+                vec![r.id, o.op.id],
+            ));
+        }
+    }
 }
 
 /// Human-readable report: counts per kind, then up to `max_examples` of each.

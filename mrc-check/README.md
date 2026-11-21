@@ -3,10 +3,11 @@
 A black-box correctness checker for Mini 3 (Micro-Redis Cluster). It runs many
 concurrent RESP2 clients against one or more routers. While they run, it adds and
 removes storage nodes and pauses routers. Then it checks the recorded history,
-key by key, for lost writes, stale reads and lists that don't add up.
+key by key, for lost writes and lists that don't add up. With `--strict`, it
+also checks for stale reads and other linearizability violations.
 
 Passing doesn't prove a cluster correct. Failing proves it isn't: every reported
-violation is something no linearizable cluster could have produced.
+violation is something no cluster meeting the requirements could have produced.
 
 ## Build and test
 
@@ -111,48 +112,53 @@ connection).
 
 ## What is checked
 
-A write *definitely took effect by time t* if it was acknowledged at t, or if a
-read that returned its value finished at t. Writes that got an error, a malformed
-reply or no reply are **indeterminate**. They may have taken effect at any time
-after they were sent, or never, so they are never held against the cluster. Each
-recorded interval contains the real one, so "A finished before B started" in the
-history is true in reality too.
+Mini 3 doesn't require linearizability. What it requires is that **no
+acknowledged write is lost and nothing is invented**, even while keys move.
+That's what the checker enforces by default. With `--strict`, it also fails on
+the stronger, linearizability-only checks. Without `--strict`, those are still
+run and their count is printed as a note, which makes a useful hint while
+debugging.
 
-Strings (per key):
+A write *definitely took effect* if it was acknowledged, or if any read returned
+its value. Writes that got an error, a malformed reply or no reply are
+**indeterminate**. They may have taken effect or not, so they are never held
+against the cluster. Each recorded interval contains the real one, so "A
+finished before B started" in the history is true in reality too.
 
-- **stale read**: a `GET` returned value v (or nil), but some write W' started after
-  v's write was acknowledged, and W' definitely took effect before the `GET` began.
-- **lost write**: the same, for a final read. A write vanished.
-- **value never written** / **read from the future**: the value isn't one we
-  wrote to that key, or its `SET` was sent after the `GET` finished.
+*Required (always fail the run):*
 
-Lists (per key). With only `RPUSH`, a list only grows by appending.
-
-- **lists diverge**: every `LRANGE` result must be a prefix of the longest one.
-- **stale read / lost write**: an `LRANGE` is missing a push that definitely took
-  effect before it began.
-- **RPUSH length disagrees with list**: `RPUSH` returning k means its value is item k.
-- **two RPUSHes returned the same length**.
-- **list order contradicts real time**: a push that finished before another started
-  sits after it.
-- **list got shorter**: a length seen by `RPUSH`, `LRANGE` or `LLEN` is smaller than
-  one seen by an operation that finished before it started. (An `RPUSH` must see a strictly larger length.)
-- **list longer than pushes so far**, **duplicate list item**, **value never
-  written**, **read from the future**.
-
-Also:
-
+- **lost write**, checked on the final reads, which happen once the cluster is quiet.
+  - String key: the final `GET` must not return nil, or a value from write W,
+    if another write that definitely took effect started after W was acknowledged.
+  - List key: the final `LRANGE` must contain every push that definitely took
+    effect. It must also be at least as long as any length seen during the run.
+    Order doesn't matter here.
+- **value never written**, **read from the future** (a value read before its
+  write was even sent), **duplicate list item**, and **list longer than pushes so far**.
+  No correct cluster of any kind produces these.
 - **malformed or wrong-type reply**, for example `GET` answered with an integer.
 - **availability**: the run fails if more than `--max-failed-ops` (default 0)
   requests got an error reply or no reply. A router that retries properly never
   shows its clients an error. Raise the limit if you expect some.
 - **a schedule step failed**: `start-node`, `add-node` or `remove-node` failed or timed out.
 
-These checks are sound but not complete. A full linearizability search (for
-example Wing & Gong with the P-compositionality of per-key histories) would catch
-more, such as cycles that need several writes to expose. It isn't implemented. A
-split brain, where two nodes serve the same key, shows up as stale reads or
-diverging lists as soon as clients of the two halves interleave.
+*Strict only (`--strict`), per key, during the run:*
+
+- **stale read**: a `GET` returned a value that had definitely been overwritten
+  before the `GET` began. Or an `LRANGE` is missing a push that definitely took
+  effect before it began.
+- **lists diverge**: every `LRANGE` result must be a prefix of the longest one.
+- **RPUSH length disagrees with list**: `RPUSH` returning k means its value is item k.
+  Also **two RPUSHes returned the same length**.
+- **list order contradicts real time**: a push that finished before another started
+  sits after it.
+- **list got shorter**: a length seen by `RPUSH`, `LRANGE` or `LLEN` is smaller than
+  one seen by an operation that finished before it started.
+
+A split brain, where two nodes serve the same key, usually shows up as a lost
+write: the final reads find only one half's writes. The strict checks are sound
+but not complete. A full linearizability search would catch more, and it isn't
+implemented.
 
 ## Output
 
@@ -160,7 +166,7 @@ The run prints a summary: operations by command, outcomes, latency p50/p99/max
 of successful requests (a pause shows up in the max), and the schedule with each
 step's start and end times. Then it prints violations grouped by kind, with up to
 `--max-examples` examples each. Every example names the operations involved, with
-times, so you can match them against your own logs:
+times, so you can match them against your own logs. Here's one from a `--strict` run:
 
 ```
 STALE READ x3 on 2 key(s): A read returned a value that had definitely been overwritten ...
