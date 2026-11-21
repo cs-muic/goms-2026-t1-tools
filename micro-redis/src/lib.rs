@@ -5,12 +5,15 @@
 //! - [`db`]: the key space.
 //! - [`cmd`]: parsing and running commands.
 //! - [`server`]: the accept loop.
+//! - [`client`]: a minimal client, for talking to other servers.
 
+pub mod client;
 pub mod cmd;
 pub mod connection;
 pub mod db;
 pub mod resp;
 pub mod server;
 
+pub use client::Client;
 pub use db::Db;
 pub use resp::Frame;
